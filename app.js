@@ -7,6 +7,18 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Middleware to capture raw body
+app.use((req, res, next) => {
+  let data = '';
+  req.on('data', chunk => {
+    data += chunk;
+  });
+  req.on('end', () => {
+    req.rawBody = data;
+    next();
+  });
+});
+
 // Middleware pour parser le JSON du body
 app.use(express.json());
 
@@ -285,8 +297,74 @@ app.get('/products', async (req, res) => {
   }
 });
 
-// Démarrage du serveur
+const crypto = require('crypto');
+
+app.post('/webhooks/shopify-sales', async (req, res) => {
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+  const wehook_key = process.env.WEBHOOK_KEY;
+
+ const generated_hash = crypto
+    .createHmac('sha256', wehook_key)
+    .update(req.rawBody, 'utf8')
+    .digest('base64');
+
+  if (hmac === generated_hash) {
+    console.log('Webhook verified');
+
+    const order = JSON.parse(req.rawBody);
+
+    console.log(order)
+    if (order.line_items) {
+      const line_items = order.line_items;
+
+      for (const item of line_items) {
+        const shopify_product_id = item.product_id;
+        const quantity = item.quantity;
+
+        // Fetch the product from the database based on the Shopify product ID
+        const { data: products, error } = await supabase
+          .from('products')
+          .select('id, sales_count')
+          .eq('shopify_id', shopify_product_id);
+
+        if (error) {
+          console.error('Error fetching product:', error);
+          return res.status(500).json({ error: 'Error fetching product from database' });
+        }
+
+        if (products && products.length > 0) {
+          const product = products[0];
+          const product_id = product.id;
+          const current_sales_count = product.sales_count || 0;
+          const new_sales_count = current_sales_count + quantity;
+
+          // Update the sales count in the database
+          const { data, error } = await supabase
+            .from('products')
+            .update({ sales_count: new_sales_count })
+            .eq('id', product_id);
+
+          if (error) {
+            console.error('Error updating sales count:', error);
+            return res.status(500).json({ error: 'Error updating sales count in database' });
+          }
+
+          console.log(`Updated sales count for product ${product_id} to ${new_sales_count}`);
+        } else {
+          console.log(`Product with shopify_id ${shopify_product_id} not found in database`);
+        }
+      }
+    } else {
+      console.log('No line items in this order.');
+    }
+
+    res.status(200).send('OK');
+  } else {
+    console.log('Webhook not verified');
+    res.status(403).send('Forbidden');
+  }
+});
+
 app.listen(port, () => {
   console.log(`L'API est démarrée sur le port ${port}`);
 });
- 
