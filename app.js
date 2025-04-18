@@ -289,3 +289,4 @@ app.get('/products', async (req, res) => {
 app.listen(port, () => {
   console.log(`L'API est démarrée sur le port ${port}`);
 });
+ 
