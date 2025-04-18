@@ -38,7 +38,7 @@ const authenticateToken = async (req, res, next) => {
     // Requête pour récupérer l'utilisateur avec ses informations de rôle
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, name, email, role_id, roles(id, name, can_post_login, can_get_my_user, can_get_users)')
+      .select('id, name, email, role_id, roles(id, name, can_post_login, can_get_my_user, can_get_users, can_post_products)')
       .eq('id', decoded.id)
       .single();
 
@@ -59,7 +59,7 @@ const authenticateToken = async (req, res, next) => {
 const checkPermission = (permission) => {
   return (req, res, next) => {
     if (!req.user || !req.user.roles || !req.user.roles[permission]) {
-      return res.status(403).json({ error: 'Permission refusée' });
+      return res.status(403).json({ error: 'Permission refusée: ' + permission });
     }
     next();
   };
@@ -186,6 +186,67 @@ app.get('/users', authenticateToken, checkPermission('can_get_users'), async (re
     }
     return res.json(users);
   } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Endpoint POST /products
+ * Crée un produit dans Shopify et enregistre l'ID du produit et l'ID de l'utilisateur.
+ * Nécessite que le token JWT soit envoyé dans l'en-tête Authorization.
+ * Permission requise : can_post_products
+ */
+app.post('/products', authenticateToken, checkPermission('can_post_products'), async (req, res) => {
+  const { name, price } = req.body;
+  const userId = req.user.id;
+
+  if (!name || !price) {
+    return res.status(400).json({ error: "Les champs name et price sont requis." });
+  }
+
+  try {
+    const shopifyEndpoint = process.env.SHOPIFY_SHOP_URL + `/admin/api/2025-04/products.json`;
+    const shopifyAccessToken = process.env.SHOPIFY_ACCESS_TOKEN; 
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': shopifyAccessToken,
+    };
+
+    const productData = {
+      product: {
+        title: name,
+        variants: [{ price: price }],
+      },
+    };
+
+    const response = await fetch(shopifyEndpoint, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(productData),
+    });
+
+    const responseData = await response.json();
+
+    if (!response.ok) {
+      console.error('Shopify API Error:', responseData);
+      return res.status(500).json({ error: `Erreur lors de la création du produit dans Shopify` });
+    }
+
+    const shopifyProductId = responseData.product.id;
+
+    const { data, error } = await supabase
+      .from('products')
+      .insert([{ shopify_id: shopifyProductId, created_by: userId }])
+      .single();
+
+    if (error) {
+      console.error('Supabase Error:', error);
+      return res.status(500).json({ error: 'Erreur lors de l\'enregistrement dans la base de données' });
+    }
+
+    return res.status(201).json({ message: "Produit créé avec succès dans Shopify et enregistré dans la base de données.", productId: shopifyProductId });
+  } catch (err) {
+    console.error('Error:', err);
     return res.status(500).json({ error: err.message });
   }
 });
