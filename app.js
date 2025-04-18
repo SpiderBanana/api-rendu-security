@@ -251,6 +251,40 @@ app.post('/products', authenticateToken, checkPermission('can_post_products'), a
   }
 });
 
+app.get('/my-products', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  try {
+    const { data: products, error } = await supabase
+      .from('products')
+      .select('*')
+      .eq('created_by', userId);
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    return res.json(products);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/products', async (req, res) => {
+  try {
+    const { data: products, error } = await supabase
+      .from('products')
+      .select('*');
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    return res.json(products);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // Démarrage du serveur
 app.listen(port, () => {
   console.log(`L'API est démarrée sur le port ${port}`);
