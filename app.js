@@ -2,22 +2,11 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
+const multer = require('multer');
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 3000;
-
-// Middleware to capture raw body
-app.use((req, res, next) => {
-  let data = '';
-  req.on('data', chunk => {
-    data += chunk;
-  });
-  req.on('end', () => {
-    req.rawBody = data;
-    next();
-  });
-});
 
 // Middleware pour parser le JSON du body
 app.use(express.json());
@@ -50,7 +39,7 @@ const authenticateToken = async (req, res, next) => {
     // Requête pour récupérer l'utilisateur avec ses informations de rôle
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, name, email, role_id, roles(id, name, can_post_login, can_get_my_user, can_get_users, can_post_products)')
+      .select('id, name, email, role_id, roles(id, name, can_post_login, can_get_my_user, can_get_users, can_post_products, can_upload_image)')
       .eq('id', decoded.id)
       .single();
 
@@ -202,15 +191,19 @@ app.get('/users', authenticateToken, checkPermission('can_get_users'), async (re
   }
 });
 
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
+
 /**
  * Endpoint POST /products
  * Crée un produit dans Shopify et enregistre l'ID du produit et l'ID de l'utilisateur.
  * Nécessite que le token JWT soit envoyé dans l'en-tête Authorization.
  * Permission requise : can_post_products
  */
-app.post('/products', authenticateToken, checkPermission('can_post_products'), async (req, res) => {
+app.post('/products', authenticateToken, checkPermission('can_post_products'), upload.single('image'), async (req, res) => {
   const { name, price } = req.body;
   const userId = req.user.id;
+  let image = req.file;
 
   if (!name || !price) {
     return res.status(400).json({ error: "Les champs name et price sont requis." });
@@ -218,7 +211,7 @@ app.post('/products', authenticateToken, checkPermission('can_post_products'), a
 
   try {
     const shopifyEndpoint = process.env.SHOPIFY_SHOP_URL + `/admin/api/2025-04/products.json`;
-    const shopifyAccessToken = process.env.SHOPIFY_ACCESS_TOKEN; 
+    const shopifyAccessToken = process.env.SHOPIFY_ACCESS_TOKEN;
     const headers = {
       'Content-Type': 'application/json',
       'X-Shopify-Access-Token': shopifyAccessToken,
@@ -245,6 +238,47 @@ app.post('/products', authenticateToken, checkPermission('can_post_products'), a
     }
 
     const shopifyProductId = responseData.product.id;
+
+    // Upload image to Shopify
+    console.log(req.user.roles, req.user.roles.can_upload_image,  image)
+    if (req.user.roles && req.user.roles.can_upload_image && image) {
+      try {
+        const imageEndpoint = process.env.SHOPIFY_SHOP_URL + `/admin/api/2025-04/products/${shopifyProductId}/images.json`;
+
+        const imageHeaders = {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': shopifyAccessToken,
+        };
+
+        const imageData = {
+          image: {
+            attachment: image.buffer.toString('base64'),
+            filename: image.originalname,
+            content_type: image.mimetype,
+          },
+        };
+
+        console.log('Image data:', imageData);
+
+        const imageResponse = await fetch(imageEndpoint, {
+          method: 'POST',
+          headers: imageHeaders,
+          body: JSON.stringify(imageData),
+        });
+
+        const imageResponseData = await imageResponse.json();
+
+        if (!imageResponse.ok) {
+          console.error('Shopify Image API Error:', imageResponseData);
+          return res.status(500).json({ error: `Erreur lors du téléchargement de l'image dans Shopify` });
+        }
+
+        console.log('Image uploaded to Shopify:', imageResponseData);
+      } catch (imageError) {
+        console.error('Shopify Image Upload Error:', imageError);
+        return res.status(500).json({ error: 'Erreur lors du téléchargement de l\'image dans Shopify' });
+      }
+    }
 
     const { data, error } = await supabase
       .from('products')
@@ -362,6 +396,31 @@ app.post('/webhooks/shopify-sales', async (req, res) => {
   } else {
     console.log('Webhook not verified');
     res.status(403).send('Forbidden');
+  }
+});
+
+/**
+ * Endpoint GET /my-bestsellers
+ * Retourne la liste des produits de l'utilisateur triés par nombre de ventes.
+ * Nécessite que le token JWT soit envoyé dans l'en-tête Authorization.
+ * Permission requise : can_get_my_bestsellers
+ */
+app.get('/my-bestsellers', authenticateToken, checkPermission('can_get_my_bestsellers'), async (req, res) => {
+  const userId = req.user.id;
+  try {
+    const { data: products, error } = await supabase
+      .from('products')
+      .select('*')
+      .eq('created_by', userId)
+      .order('sales_count', { ascending: false });
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    return res.json(products);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
